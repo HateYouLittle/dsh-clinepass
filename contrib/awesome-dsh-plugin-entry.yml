@@ -1,0 +1,18 @@
+# Submission entry for the Awesome DSH Plugin catalog.
+#
+# Destination: https://github.com/awesome-dsh-plugin/awesome-dsh-plugin
+# Target path: data/plugins/HateYouLittle__dsh-clinepass.yml
+#
+# The name is `<owner>__<repo>.yml`; a pull request may add at most 3 entries and
+# the whole submission is this one file (the READMEs are generated).
+# Requirements checked by CI: package.json declares `dsh.bundle`, the repository
+# is at least one day old, the `dsh-plugin` topic is set on the repository, and
+# `description.en` must be accurate and free of marketing wording.
+url: https://github.com/HateYouLittle/dsh-clinepass
+name: HateYouLittle/dsh-clinepass
+category: model
+description:
+  en: 'ClinePass provider for DeepSeek Harness: 15 bundled subscription and free models, a settings page with per-model capacity overrides, subscription usage for the 5-hour, weekly and monthly windows, and multi-account failover to a backup account.'
+  zh: 'DeepSeek Harness 的 ClinePass 模型提供方：内置 15 个订阅与免费模型，提供设置页与按模型容量覆盖、5 小时／每周／每月订阅用量，以及多账号与备用账号自动切换。'
+# Optional: a GitHub-hosted raster image (png/jpg/jpeg/webp), drawn at ~96px.
+# icon: https://raw.githubusercontent.com/HateYouLittle/dsh-clinepass/main/assets/icon-180.png
