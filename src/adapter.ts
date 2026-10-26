@@ -1,0 +1,414 @@
+/**
+ * The ClinePass adapter: one route, one catalog, one task identity per call.
+ *
+ * Every request to the API carries two Harness-owned headers: the attribution
+ * User-Agent (`deepseek-harness/<version>`), which pi-ai's client lets request
+ * headers override, and `X-Task-ID`, the documented Cline request identity that
+ * the extension itself uses to group a conversation's calls. The header value
+ * follows the request's session id, with special strings mapped to stable ASCII
+ * values across continuation and restore. A request with no session id gets one
+ * fresh random value shared by every account attempt in that logical call.
+ *
+ * Multi-turn correctness rides on the shared pi-ai conversion machinery
+ * (`toPiContext` reconstructs provider-native replay state from the session
+ * log; `toStreamChunks` maps events to seam chunks), so assistant history,
+ * tool calls, and usage land in the session log exactly as the generic pi-ai
+ * adapter records them. Image content rides the same machinery: models whose
+ * catalog entry declares the image modality convert attachments through the
+ * durable attachment service, and every other model refuses image content
+ * before any provider I/O.
+ *
+ * @module dsh-llm-clinepass/adapter
+ */
+
+import { createHash, randomUUID } from 'node:crypto'
+import { ClinePassRequestExecutor } from './request-executor.ts'
+import type { ClinePassRequestExecutorOptions } from './request-executor.ts'
+import type { Api, Model } from './sdk-types.ts'
+import {
+  LlmAdapter,
+  LlmError,
+  ReasoningEffortId,
+} from '@deepseek-ai/dsh-llm'
+import type {
+  GenerateOptions,
+  LlmModelInfo,
+  LlmResolvedModelInfo,
+  StreamChunk,
+} from '@deepseek-ai/dsh-llm'
+import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
+import { PROVIDER_ID, DISPLAY_NAME, ClinePassCatalog, type CatalogSnapshot, type CatalogDiagnostic } from './catalog.ts'
+import { assertBaseURL, DEFAULT_REQUEST_PREPARATION_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS } from './config.ts'
+import { ClineCatalogManager } from './catalog-manager.ts'
+import { accountFallback, isGatewayKeyRejection } from './account-policy.ts'
+import { ProxyTransport } from './proxy.ts'
+import type { ClinePassConfig, ClinePassModelLimits } from './config.ts'
+import { isModelEnabled } from './models-contract.ts'
+import { reasoningChoices } from './reasoning.ts'
+import { accountsOf, accountRefOf, type ClineAccountSwitch } from './accounts.ts'
+import { CallTrace, type ClineCallTrace } from './call-trace.ts'
+import { requestMaxTokens } from './request-budget.ts'
+export type { ClineCallTrace } from './call-trace.ts'
+export type { ClinePassImageAccess } from './request-executor.ts'
+
+/** Recheck a gateway-rejected key after a bounded window. */
+const REJECTED_KEY_TTL_MS = 5 * 60_000
+
+/** Apply one request's capacities without changing the shared catalog or its fallbacks. */
+function withModelLimit(model: Model<Api>, limits: ClinePassModelLimits): Model<Api> {
+  const limit = limits[model.id]
+  if (limit == null) return model
+  return {
+    ...model,
+    contextWindow: limit.contextWindow ?? model.contextWindow,
+    maxTokens: limit.maxTokens ?? model.maxTokens,
+    reasoningBudgetPresets: limit.thinkingBudgets ?? undefined,
+  }
+}
+
+/** One request's serving account, with the identity captured before discovery. */
+export interface ClineAccountSettlement {
+  seq: number
+  generation: number
+  config: ClinePassConfig
+  ref: string
+  notice?: ClineAccountSwitch
+}
+
+/** Constructor inputs for {@link ClinePassAdapter}. */
+export interface ClinePassAdapterOptions extends ClinePassRequestExecutorOptions {
+  /** Shared with Host usage reads for this plugin mount. */
+  transport?: ProxyTransport
+  /** Mount-owned discovery; direct construction supplies its own manager. */
+  catalog?: (config: ClinePassConfig) => ClinePassCatalog
+  /**
+   * The current configuration, re-read at every operation: a settings write
+   * reaches the next request without a restart, and one operation never mixes
+   * two configuration generations.
+   */
+  config: () => ClinePassConfig
+  /** Observe one bounded, content-free summary for every dispatched call. */
+  onCallTrace?: (trace: ClineCallTrace) => void
+  /** Observe the catalog falling back to the curated table. */
+  onFallback?: (detail: { url: string; error: unknown; kept: number }) => void
+  /** Observe live ids the curated table cannot route. */
+  onOmitted?: (ids: readonly string[]) => void
+  onCatalogWarning?: (warning: string) => void
+  /** Content-free timings for cache restoration and each shared online refresh. */
+  onCatalogDiagnostic?: (event: CatalogDiagnostic) => void
+  /** Re-read picker models after a background catalog refresh commits. */
+  onCatalogRefresh?: () => void
+  /** Host account-state version for actual requests, captured before asynchronous model discovery. */
+  accountGeneration?: () => number
+  /** One outcome for both the displayed notice and the persisted selection. */
+  onAccountSettled?: (event: ClineAccountSettlement) => void
+  /** Legacy notice observer. Hosts that persist selection should use onAccountSettled. */
+  onAccountSwitch?: (notice: ClineAccountSwitch | undefined, config: ClinePassConfig, seq: number) => void
+}
+
+/** Configuration, model and provider captured together before discovery yields. */
+interface ClinePassModelSnapshot {
+  config: ClinePassConfig
+  catalog: CatalogSnapshot
+  model: Model<Api>
+}
+
+/** Only a request that can settle an account needs an account-state fence. */
+interface ClinePassCallSnapshot extends ClinePassModelSnapshot {
+  generation: number
+}
+
+/** One logical call's wire identity, shared by all account attempts and SDK cache keys. */
+interface ClinePassDispatchSnapshot extends ClinePassCallSnapshot {
+  sessionId: string
+}
+
+/** Reserved output namespace; literal IDs in this namespace must be mapped too. */
+const TASK_HEADER_PREFIX = 'dsh-cline-task-v1-'
+
+/**
+ * Keep visible ASCII IDs unless they occupy the mapped namespace. Hash every
+ * other non-empty string without trimming or Unicode normalization, so special
+ * IDs survive HTTP serialization without merging distinct conversations.
+ * UTF-16LE preserves lone surrogates too; base64url keeps the result short
+ * enough for a header value and for the SDK's prompt-cache-key limit. Missing
+ * IDs get a per-call UUID.
+ */
+function clineTaskValue(sessionId: string | undefined): string {
+  if (sessionId === undefined || sessionId.length === 0) return randomUUID()
+  if (!/[^\x21-\x7e]/.test(sessionId) && !sessionId.startsWith(TASK_HEADER_PREFIX)) return sessionId
+  return TASK_HEADER_PREFIX + createHash('sha256').update(sessionId, 'utf16le').digest('base64url')
+}
+
+/**
+ * The single route's adapter. The catalog snapshot freezes at each operation,
+ * so a refresh between two requests never mixes model generations inside one
+ * call.
+ */
+export class ClinePassAdapter extends LlmAdapter {
+  private readonly resolveCatalog: (config: ClinePassConfig) => ClinePassCatalog
+  private readonly transport: ProxyTransport
+  private readonly requestExecutor: ClinePassRequestExecutor
+
+  /** Per-reference rejection deadlines, isolated by the gateway that rejected it. */
+  private readonly rejectedKeys = new Map<string, Map<string, number>>()
+  /** Reference updates invalidate rejections from attempts using an older key. */
+  private readonly credentialVersions = new Map<string, number>()
+
+  /** Monotonic sequence of the latest request this adapter started. */
+  private callSeq = 0
+
+  constructor(private readonly options: ClinePassAdapterOptions) {
+    super()
+    this.transport = options.transport ?? new ProxyTransport()
+    this.requestExecutor = new ClinePassRequestExecutor(options, this.transport)
+    const catalogs = options.catalog ? undefined : new ClineCatalogManager({
+      transport: this.transport, onFallback: options.onFallback, onOmitted: options.onOmitted,
+      onRefresh: options.onCatalogRefresh, onWarning: options.onCatalogWarning, onDiagnostic: options.onCatalogDiagnostic,
+    })
+    this.resolveCatalog = options.catalog ?? (config => catalogs!.forConfig(config))
+  }
+
+  dispose(): Promise<void> { return this.transport.dispose() }
+
+  /**
+   * The catalog resolver for one configuration, rebuilding on the facts it
+   * owns. Public for the plugin's discovery registration, which resolves the
+   * current configuration the same way the adapter does.
+   * @param config - the endpoint and refresh interval for the raw catalog.
+   * @returns the resolver caching catalog values, independent of deployment limits.
+   */
+  catalogOf(config: ClinePassConfig): ClinePassCatalog {
+    return this.resolveCatalog(config)
+  }
+
+  override providerInfo(provider: string): { id: string; name: string } {
+    return { id: provider, name: DISPLAY_NAME }
+  }
+
+  override async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
+    const config = this.options.config()
+    // Picker notifications only change local visibility. Settings discovery
+    // explicitly refreshes this same catalog before notifying open pickers.
+    const snapshot = await this.catalogOf(config).snapshot()
+    // DSH resolves every listed model before showing the provider. Unconfigured
+    // ids belong in settings discovery diagnostics, not this selectable list.
+    return [...snapshot.models.values()]
+      .filter(model => isModelEnabled({ id: model.id, ...snapshot.details.get(model.id) }, config.modelVisibility))
+      .map(model => ({
+        provider: PROVIDER_ID,
+        id: model.id,
+        name: model.name,
+        inputModalities: [...model.input],
+      }))
+  }
+
+  override async resolveModel(
+    _provider: string,
+    model: string,
+    signal?: AbortSignal,
+  ): Promise<LlmResolvedModelInfo> {
+    const snapshot = await this.modelSnapshot(model, signal)
+    return this.modelInfo(snapshot.model, snapshot.config.modelLimits)
+  }
+
+  /** Capture limits and protocol before discovery can yield to a settings update. */
+  private async modelSnapshot(model: string, signal?: AbortSignal,
+    config = structuredClone(this.options.config()),
+  ): Promise<ClinePassModelSnapshot> {
+    using preparation = deadline(signal, config.requestPreparationTimeoutMs ?? DEFAULT_REQUEST_PREPARATION_TIMEOUT_MS, 'LLM_PREPARATION_TIMEOUT')
+    let catalog: CatalogSnapshot
+    try { catalog = await this.catalogOf(config).forModel(model, preparation.signal) }
+    catch (error) {
+      if (timeoutOf(preparation.signal, 'LLM_PREPARATION_TIMEOUT')) throw new LlmError('clinepass discovery preparation timeout', 'TIMEOUT', { cause: error })
+      throw error
+    }
+    const resolved = catalog.models.get(model)
+    if (resolved === undefined) {
+      throw new LlmError(`clinepass has no model "${model}"`, 'UNKNOWN_MODEL')
+    }
+    return { config, catalog, model: withModelLimit(resolved, config.modelLimits) }
+  }
+
+  /** Keep capability resolution and eventual dispatch on the same configuration. */
+  override async prepareCall(_provider: string, model: string, signal?: AbortSignal): Promise<{
+    model: LlmResolvedModelInfo
+    stream: (options: GenerateOptions) => AsyncIterable<StreamChunk>
+  }> {
+    const seq = ++this.callSeq
+    const generation = this.options.accountGeneration?.() ?? 0
+    const snapshot = { generation, ...await this.modelSnapshot(model, signal) }
+    return {
+      model: this.modelInfo(snapshot.model, snapshot.config.modelLimits),
+      stream: options => this.streamWithSnapshot(options, snapshot, seq),
+    }
+  }
+
+  /** Report the same default allowance used by dispatch so the host can budget compaction. */
+  private modelInfo(model: Model<Api>, limits: ClinePassModelLimits): LlmResolvedModelInfo {
+    const defaultMaxTokens = requestMaxTokens(model, limits)
+    const reasoning: Pick<LlmResolvedModelInfo, 'reasoning'> = {}
+    const choices = reasoningChoices(model)
+    if (choices.length > 0) {
+      reasoning.reasoning = {
+        efforts: choices.map(choice => ({ ...choice, id: ReasoningEffortId(choice.id) })),
+      }
+    }
+    return {
+      provider: PROVIDER_ID,
+      id: model.id,
+      name: model.name,
+      inputModalities: [...model.input],
+      context: { contextWindow: model.contextWindow },
+      ...defaultMaxTokens === undefined ? {} : { defaultMaxTokens },
+      ...reasoning,
+    }
+  }
+
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    if (options.stop !== undefined) {
+      throw new LlmError('llm-clinepass does not support GenerateOptions.stop', 'UNSUPPORTED_OPTION')
+    }
+    yield* this.dispatch(options, ++this.callSeq)
+  }
+
+  private async *streamWithSnapshot(options: GenerateOptions, snapshot: ClinePassCallSnapshot, seq: number): AsyncIterable<StreamChunk> {
+    yield* this.dispatch(options, seq, snapshot)
+  }
+
+  private async *dispatch(options: GenerateOptions, seq: number, prepared?: ClinePassCallSnapshot): AsyncIterable<StreamChunk> {
+    const captured = prepared ?? { generation: this.options.accountGeneration?.() ?? 0, config: structuredClone(this.options.config()) }
+    const sessionId = clineTaskValue(options.sessionId === undefined ? undefined : String(options.sessionId))
+    const trace = new CallTrace(options.model, this.options.onCallTrace)
+    using whole = deadline(options.signal, captured.config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, 'LLM_REQUEST_TIMEOUT')
+    try {
+      const snapshot = prepared ?? {
+        generation: captured.generation,
+        ...await trace.measure('discovery', () => this.modelSnapshot(options.model, whole.signal, captured.config)),
+      }
+      for await (const chunk of this.streamAccounts({ ...options, signal: whole.signal }, { ...snapshot, sessionId }, seq, trace)) {
+        if (chunk.type === 'finish') {
+          trace.outcome = chunk.reason.kind === 'error' ? 'failed' : chunk.reason.kind === 'aborted' ? 'aborted' : 'completed'
+          if (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted') trace.code = chunk.reason.failure?.code
+        }
+        yield chunk
+      }
+    } catch (error) {
+      trace.outcome = 'failed'
+      if (timeoutOf(whole.signal, 'LLM_REQUEST_TIMEOUT')) {
+        trace.code = 'TIMEOUT'
+        throw new LlmError('clinepass whole request timeout', 'TIMEOUT', { cause: error })
+      }
+      if (options.signal?.aborted) {
+        trace.outcome = 'aborted'; trace.code = 'ABORTED'
+        yield { type: 'finish', reason: { kind: 'aborted', failure: { code: 'ABORTED', message: 'clinepass request aborted by caller' } } }
+        return
+      }
+      trace.code = error instanceof LlmError ? error.code : 'PI_AI_ERROR'
+      throw error
+    } finally { trace.finish() }
+  }
+
+  private async *streamAccounts(options: GenerateOptions, snapshot: ClinePassDispatchSnapshot, seq: number, trace: CallTrace): AsyncIterable<StreamChunk> {
+    const accounts = accountsOf(snapshot.config)
+    if (accounts.length === 0) throw new LlmError('ClinePass has no accounts', 'MISSING_CREDENTIAL')
+    // The preferred reference resolves through accountRefOf: an empty string
+    // keeps the default reference's semantics rather than naming no account.
+    const preferred = accountRefOf(snapshot.config)
+    const ordered = snapshot.config.autoSwitch
+      ? [...new Set([preferred, ...accounts.map(account => account.apiKeyEnv)])]
+      : [preferred]
+    // Keys the gateway rejected lately are skipped for a bounded window:
+    // re-sending a full transcript to a rejected key is pure waste. If every
+    // candidate is in that window the original order stands, so the gateway's
+    // own error — not a synthetic local one — reaches the caller.
+    const now = Date.now()
+    const gateway = assertBaseURL(snapshot.config.baseURL)
+    const usable = ordered.filter(ref => {
+      const rejected = this.rejectedKeys.get(ref)
+      const until = rejected?.get(gateway)
+      if (until === undefined) return true
+      if (now >= until) {
+        rejected!.delete(gateway)
+        if (rejected!.size === 0) this.rejectedKeys.delete(ref)
+        return true
+      }
+      return false
+    })
+    const refs = usable.length > 0 ? usable : ordered
+    const skippedRef = ordered.find(ref => !refs.includes(ref))
+    let switchReason: ClineAccountSwitch['reason'] | undefined
+    let failedRef: string | undefined
+    for (let attempt = 0; attempt < refs.length; attempt++) {
+      const credentialVersion = this.credentialVersions.get(refs[attempt]!) ?? 0
+      trace.startAttempt()
+      let emitted = false
+      let usage: Extract<StreamChunk, { type: 'usage' }> | undefined
+      let retry = false
+      const retryFailure = (failure: { code: string } | undefined): boolean => {
+        const reason = accountFallback({ failure, emitted, totalTokens: usage?.usage.totalTokens ?? 0,
+          aborted: options.signal?.aborted === true, hasNext: attempt + 1 < refs.length })
+        if (!reason || !failure) return false
+        if (isGatewayKeyRejection(failure)
+          && credentialVersion === (this.credentialVersions.get(refs[attempt]!) ?? 0)) this.rememberRejectedKey(refs[attempt]!, gateway)
+        switchReason ??= reason
+        failedRef ??= refs[attempt]!
+        return true
+      }
+      const announce = (): void => {
+        if (emitted) return
+        const serving = refs[attempt]!
+        const replaced = failedRef ?? skippedRef ?? preferred
+        const notice: ClineAccountSwitch | undefined = serving === preferred ? undefined : {
+          // The notice names the account the journey left: the first one that
+          // failed this request, else the first one skipped for a remembered
+          // rejection.
+          fromRef: replaced,
+          toRef: serving,
+          reason: switchReason ?? 'credential',
+          at: Date.now(),
+        }
+        this.options.onAccountSettled?.({ seq, generation: snapshot.generation, config: snapshot.config, ref: serving, notice })
+        this.options.onAccountSwitch?.(notice, snapshot.config, seq)
+      }
+      try {
+        for await (const chunk of this.requestExecutor.stream(options, {
+          config: { ...snapshot.config, apiKeyEnv: refs[attempt]! },
+          model: snapshot.model, provider: snapshot.catalog.provider, sessionId: snapshot.sessionId,
+        }, trace)) {
+          if (chunk.type === 'usage') { usage = chunk; continue }
+          if (chunk.type === 'finish') {
+            trace.endAttempt(chunk.reason.kind === 'error' ? 'failed' : chunk.reason.kind === 'aborted' ? 'aborted' : 'completed',
+              chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted' ? chunk.reason.failure?.code : undefined)
+            const failure = chunk.reason.kind === 'error' ? chunk.reason.failure : undefined
+            if (retryFailure(failure)) { retry = true; break }
+            if (chunk.reason.kind === 'stop' || chunk.reason.kind === 'tool-calls' || chunk.reason.kind === 'max-tokens') announce()
+            if (usage) yield usage
+            yield chunk
+            return
+          }
+          announce()
+          emitted = true
+          yield chunk
+        }
+        if (!retry) return
+      } catch (error) {
+        trace.endAttempt(options.signal?.aborted && !(error instanceof LlmError && error.code === 'TIMEOUT') ? 'aborted' : 'failed',
+          error instanceof LlmError ? error.code : 'PI_AI_ERROR')
+        if (!retryFailure(error instanceof LlmError ? error : undefined)) throw error
+      } finally { trace.endAttempt() }
+    }
+  }
+
+  private rememberRejectedKey(ref: string, gateway: string): void {
+    const rejected = this.rejectedKeys.get(ref) ?? new Map<string, number>()
+    rejected.set(gateway, Date.now() + REJECTED_KEY_TTL_MS)
+    this.rejectedKeys.set(ref, rejected)
+  }
+
+  /** A stored change to a reference outranks the gateway's last rejection of it. */
+  forgetRejectedKey(ref: string): void {
+    this.credentialVersions.set(ref, (this.credentialVersions.get(ref) ?? 0) + 1)
+    this.rejectedKeys.delete(ref)
+  }
+}

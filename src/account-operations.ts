@@ -1,0 +1,70 @@
+/** Durable, client-safe intentions. Never put a credential value in this document. */
+import { ACCOUNT_REF_PATTERN, ACCOUNT_REF_PREFIX, MAX_ACCOUNTS, accountRefOf, accountsOf, assertAccounts, moveAccountFirst, type AccountSettings, type ClineAccount } from './accounts.ts'
+
+export type ClineAccountOperation =
+  | { id: string; kind: 'add'; account: ClineAccount; previousRef: string; select: boolean }
+  | { id: string; kind: 'remove'; account: ClineAccount }
+
+export function ownsAccountCredential(account: ClineAccount): boolean {
+  return /^[a-f0-9]{32}$/.test(account.id) && account.apiKeyEnv === ACCOUNT_REF_PREFIX + account.id.toUpperCase()
+}
+
+export function assertAccountOperations(value: readonly ClineAccountOperation[] | undefined): void {
+  if (value === undefined) return
+  if (!Array.isArray(value) || value.length > MAX_ACCOUNTS) throw new Error('Too many pending ClinePass account operations')
+  const ids = new Set<string>(), refs = new Set<string>()
+  for (const operation of value) {
+    if (!operation || typeof operation.id !== 'string' || !/^[a-f0-9]{32}$/.test(operation.id) || ids.has(operation.id)
+      || !['add', 'remove'].includes(operation.kind)) throw new Error('Invalid ClinePass account operation')
+    const fields = operation.kind === 'add' ? ['id', 'kind', 'account', 'previousRef', 'select'] : ['id', 'kind', 'account']
+    if (Object.keys(operation).some(key => !fields.includes(key))
+      || !operation.account || Object.keys(operation.account).some(key => !['id', 'name', 'apiKeyEnv'].includes(key))) {
+      throw new Error('Unexpected ClinePass account operation fields')
+    }
+    assertAccounts([operation.account])
+    if (refs.has(operation.account.apiKeyEnv)) throw new Error('Duplicate ClinePass account operation')
+    if (operation.kind === 'add' && (!ownsAccountCredential(operation.account)
+      || typeof operation.select !== 'boolean' || !ACCOUNT_REF_PATTERN.test(operation.previousRef))) {
+      throw new Error('Invalid ClinePass account addition')
+    }
+    ids.add(operation.id); refs.add(operation.account.apiKeyEnv)
+  }
+}
+
+/** Pending additions remain visible so a lost key write can be repaired or removed. */
+export function visibleAccountsOf(settings: AccountSettings): readonly ClineAccount[] {
+  const entries = [...accountsOf(settings)]
+  for (const operation of settings.accountOperations ?? []) {
+    if (!entries.some(account => account.apiKeyEnv === operation.account.apiKeyEnv)) entries.push(operation.account)
+  }
+  return entries
+}
+
+/** The same transition completes a foreground operation or a recovered intention. */
+export function accountOperationPatch(settings: AccountSettings, operation: ClineAccountOperation, dropLegacyRef?: string) {
+  let accounts = [...accountsOf(settings)]
+  const ref = operation.account.apiKeyEnv
+  const occupied = accounts.find(account => account.apiKeyEnv === ref || account.id === operation.account.id)
+  if (occupied && (occupied.id !== operation.account.id || occupied.apiKeyEnv !== ref)) {
+    throw new Error('Account identity changed while operation was pending')
+  }
+  let selected: string | undefined
+  if (operation.kind === 'add') {
+    if (!occupied) {
+      if (settings.accounts == null && dropLegacyRef) accounts = accounts.filter(account => account.apiKeyEnv !== dropLegacyRef)
+      accounts.push(operation.account)
+    }
+    if (operation.select && accountRefOf(settings) === operation.previousRef) selected = ref
+  } else {
+    accounts = accounts.filter(account => account.apiKeyEnv !== ref)
+    if (accountRefOf(settings) === ref && accounts.length) selected = accounts[0]!.apiKeyEnv
+  }
+  accounts = [...moveAccountFirst(accounts, selected ?? accountRefOf(settings))]
+  assertAccounts(accounts, selected ?? accountRefOf(settings))
+  return [
+    { op: 'set' as const, path: ['accounts'], value: accounts },
+    ...selected ? [{ op: 'set' as const, path: ['apiKeyEnv'], value: selected }] : [],
+    ...settings.accountOperations?.some(entry => entry.id === operation.id) ? [{ op: 'set' as const,
+      path: ['accountOperations'], value: settings.accountOperations.filter(entry => entry.id !== operation.id) }] : [],
+  ]
+}

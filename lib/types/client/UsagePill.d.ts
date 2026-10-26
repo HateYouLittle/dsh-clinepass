@@ -1,0 +1,19 @@
+import type { SnapshotStore } from '@deepseek-ai/dsh-client-store';
+import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client';
+import { type ClineUsage } from '../usage-contract.ts';
+import type { SettingsScope } from './settings.ts';
+import type { ClinePassSettings } from './section-controller.ts';
+import type { AnalyticsQuery, AnalyticsReport } from '../analytics-contract.ts';
+export interface UsagePillProps {
+    directory: SnapshotStore<ModelDirectoryState>;
+    settings: SettingsScope<ClinePassSettings>;
+    readUsage: () => Promise<ClineUsage>;
+    /** Optional so an embedded/test render can omit the dashboard. */
+    readAnalytics?: (query: AnalyticsQuery, signal?: AbortSignal) => Promise<AnalyticsReport>;
+    t: (key: string) => string;
+    getLocale?: () => string;
+    credentialChanges?: SnapshotStore<number>;
+    selectAccount?: (ref: string) => Promise<boolean>;
+}
+/** Only a visible, enabled pill mounts the usage poller. */
+export declare function UsagePill({ directory, settings, credentialChanges, ...props }: UsagePillProps): import("react").JSX.Element | null;

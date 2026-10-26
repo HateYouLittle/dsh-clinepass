@@ -1,0 +1,11 @@
+import type { TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
+import { modelsRemote } from './models-contract.ts'
+import { usageRemote } from './usage-contract.ts'
+import { accountsRemote } from './accounts-contract.ts'
+import { analyticsRemote } from './analytics-contract.ts'
+
+/** A registry owns one contribution per package; mount all plugin endpoints together. */
+export const clineRemote: TypertRemoteContribution = {
+  package: 'dsh-clinepass',
+  descriptors: [...usageRemote.descriptors, ...modelsRemote.descriptors, ...accountsRemote.descriptors, ...analyticsRemote.descriptors],
+}

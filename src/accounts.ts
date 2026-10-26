@@ -1,0 +1,69 @@
+/** Client-safe account metadata. Secrets stay in the host credential service. */
+import type { ClineAccountOperation } from './account-operations.ts'
+export type ClineAccount = {
+  id: string
+  name: string
+  apiKeyEnv: string
+}
+
+export const MAX_ACCOUNTS = 20
+export const ACCOUNT_REF_PREFIX = 'DSH_CLINEPASS_ACCOUNT_'
+export const DEFAULT_ACCOUNT_REF = 'CLINE_API_KEY'
+/** A credential reference is a bare environment variable name, never empty or decorated. */
+export const ACCOUNT_REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+export interface AccountSettings {
+  apiKeyEnv?: string
+  /** Omission/null preserves legacy credentials; an explicit empty list removes all accounts. */
+  accounts?: readonly ClineAccount[] | null
+  autoSwitch?: boolean
+  /** Recovery intentions owned by this exact settings/profile document. */
+  accountOperations?: readonly ClineAccountOperation[]
+}
+
+export function accountRefOf(settings: AccountSettings): string {
+  return settings.apiKeyEnv || DEFAULT_ACCOUNT_REF
+}
+
+/** Promote one account while preserving every other account's relative order. */
+export function moveAccountFirst(accounts: readonly ClineAccount[], ref: string): readonly ClineAccount[] {
+  const index = accounts.findIndex(account => account.apiKeyEnv === ref)
+  return index <= 0 ? accounts : [accounts[index]!, ...accounts.slice(0, index), ...accounts.slice(index + 1)]
+}
+
+/** Read legacy selections as the first account until the host persists their order. */
+export function accountsOf(settings: AccountSettings): readonly ClineAccount[] {
+  const ref = accountRefOf(settings)
+  if (settings.accounts?.length === 0) return []
+  const accounts = settings.accounts ?? []
+  return accounts.some(account => account.apiKeyEnv === ref) ? moveAccountFirst(accounts, ref) : [
+    { id: `legacy:${ref}`, name: '', apiKeyEnv: ref }, ...accounts,
+  ]
+}
+
+export function assertAccounts(accounts: readonly ClineAccount[] | null | undefined, selectedRef?: string): void {
+  if (accounts == null) return
+  if (!Array.isArray(accounts) || accounts.length > MAX_ACCOUNTS
+    || accounts.length === MAX_ACCOUNTS && selectedRef && !accounts.some(account => account.apiKeyEnv === selectedRef)) {
+    throw new Error(`ClinePass supports at most ${MAX_ACCOUNTS} accounts, including the selected reference`)
+  }
+  const ids = new Set<string>()
+  const refs = new Set<string>()
+  for (const account of accounts) {
+    if (!account || typeof account.id !== 'string' || !account.id || account.id.length > 128
+      || account.id.startsWith('legacy:') && account.id !== `legacy:${account.apiKeyEnv}`
+      || typeof account.name !== 'string' || (!account.name.trim() && account.id !== `legacy:${account.apiKeyEnv}`) || account.name.length > 80
+      || typeof account.apiKeyEnv !== 'string' || !ACCOUNT_REF_PATTERN.test(account.apiKeyEnv)
+      || ids.has(account.id) || refs.has(account.apiKeyEnv)) throw new Error('Invalid or duplicate ClinePass account')
+    ids.add(account.id)
+    refs.add(account.apiKeyEnv)
+  }
+}
+
+/** Safe UI notice for a successful request using a fallback account. */
+export interface ClineAccountSwitch {
+  fromRef: string
+  toRef: string
+  reason: 'quota' | 'credential'
+  at: number
+}

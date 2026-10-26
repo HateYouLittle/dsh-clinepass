@@ -1,0 +1,33 @@
+/** Client-safe account metadata. Secrets stay in the host credential service. */
+import type { ClineAccountOperation } from './account-operations.ts';
+export type ClineAccount = {
+    id: string;
+    name: string;
+    apiKeyEnv: string;
+};
+export declare const MAX_ACCOUNTS = 20;
+export declare const ACCOUNT_REF_PREFIX = "DSH_CLINEPASS_ACCOUNT_";
+export declare const DEFAULT_ACCOUNT_REF = "CLINE_API_KEY";
+/** A credential reference is a bare environment variable name, never empty or decorated. */
+export declare const ACCOUNT_REF_PATTERN: RegExp;
+export interface AccountSettings {
+    apiKeyEnv?: string;
+    /** Omission/null preserves legacy credentials; an explicit empty list removes all accounts. */
+    accounts?: readonly ClineAccount[] | null;
+    autoSwitch?: boolean;
+    /** Recovery intentions owned by this exact settings/profile document. */
+    accountOperations?: readonly ClineAccountOperation[];
+}
+export declare function accountRefOf(settings: AccountSettings): string;
+/** Promote one account while preserving every other account's relative order. */
+export declare function moveAccountFirst(accounts: readonly ClineAccount[], ref: string): readonly ClineAccount[];
+/** Read legacy selections as the first account until the host persists their order. */
+export declare function accountsOf(settings: AccountSettings): readonly ClineAccount[];
+export declare function assertAccounts(accounts: readonly ClineAccount[] | null | undefined, selectedRef?: string): void;
+/** Safe UI notice for a successful request using a fallback account. */
+export interface ClineAccountSwitch {
+    fromRef: string;
+    toRef: string;
+    reason: 'quota' | 'credential';
+    at: number;
+}

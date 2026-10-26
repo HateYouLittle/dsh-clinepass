@@ -1,0 +1,591 @@
+/**
+ * The ClinePass settings page: provider activation, accounts and credentials,
+ * available models and capacities, then advanced tuning. Account operations
+ * apply immediately; tuning fields use the page's save/discard actions.
+ */
+
+import { useEffect, useState } from 'react'
+import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
+import { Button, Switch, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
+import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
+import type {
+  ClinePassModels,
+  ClinePassSectionFace,
+  ClinePassSectionState,
+} from './section-controller.ts'
+import { hostAtom } from './host-primitives.ts'
+import { HintMark, HintText } from './hint-mark.tsx'
+import { ModelEditor } from './ModelEditor.tsx'
+import { AccountsCard } from './AccountsCard.tsx'
+import { AnalyticsDialog } from './AnalyticsDialog.tsx'
+import { ThemePicker } from './ThemePicker.tsx'
+import { GO_THEME_LABELS, useGoTheme } from './theme.ts'
+import { API_KEYS_URL } from './links.ts'
+import type { ClineAccountsActions } from './accounts-controller.ts'
+import type { en } from './locales.ts'
+import { USAGE_DISPLAY_MODES } from '../usage-display.ts'
+import type { AnalyticsQuery, AnalyticsReport } from '../analytics-contract.ts'
+import type { ClineUsage } from '../usage-contract.ts'
+import css from './Section.module.css'
+
+// 0.1.7 names icons by stroke weight; older hosts name them by pixel size.
+const ChevronDown = hostAtom<typeof primitives.IconChevronDownOutline14>(
+  primitives, 'IconChevronDownOutlineRegular', 'IconChevronDownOutline14',
+) ?? primitives.IconChevronDownOutline14
+
+/** The tuning fields the advanced card owns, in the order it renders them. */
+const ADVANCED_FIELDS = [
+  'usageDisplay', 'baseURL', 'proxyURL',
+  'refreshMinutes', 'streamIdleTimeoutMs', 'maxImages', 'maxRequestImageBytes',
+  'requestImagePixelBudget', 'requestImageMaxBytes',
+] as const
+
+export type { ClinePassSectionState } from './section-controller.ts'
+
+/** Section copy lookup, including the optional `{name}` template params. */
+type SectionTranslate = (key: keyof typeof en, params?: Record<string, unknown>) => string
+
+/** Injected dependencies of {@link ClinePassSection} (slot `inject`). */
+export interface ClinePassSectionInjected extends ClinePassSectionFace {
+  /** Section copy. */
+  t: SectionTranslate
+  /** Read at render time because the Host caches injected values across locale changes. */
+  getLocale?: () => string
+}
+
+/** Props delivered by the slot outlet: the inject face spread flat. */
+export type ClinePassSectionProps = Partial<InjectFace<ClinePassSectionInjected>>
+
+interface ValueFieldProps {
+  id: string
+  label: string
+  hint: string
+  field: ClinePassSectionState['baseURL']
+  invalidLabel: string
+  disabled: boolean
+  numeric?: boolean
+  placeholder?: string
+  options?: readonly { value: string; label: string }[]
+  onEdit: (text: string) => void
+}
+
+/**
+ * One staged value field: its label with the hint mark, the override badge with
+ * reset, and one control. A small enum renders as a segmented control — every
+ * option is visible at once — and everything else as a text or number input.
+ */
+function ValueField(props: ValueFieldProps) {
+  const hintId = props.id + '-hint'
+  const errorId = props.id + '-error'
+  const labelId = props.id + '-label'
+  const options = props.options
+  const selected = options ? options.findIndex(option => option.value === props.field.text) : -1
+  // The control describes itself with its hint, and with its error while the draft
+  // is invalid: the alert announces the failure once, and this keeps the specific
+  // sentence available on every later focus.
+  const describedBy = props.field.invalid ? `${errorId} ${hintId}` : hintId
+  return (
+    <div className={css.row}>
+      <div className={css.rowLabel}>
+        {options
+          ? <span id={labelId} className={css.rowTitle}>{props.label}</span>
+          : <label htmlFor={props.id} className={css.rowTitle}>{props.label}</label>}
+        <HintMark hint={props.hint} />
+      </div>
+      <div className={css.rowControl}>
+        {options ? (
+          <div
+            className={css.seg}
+            role="radiogroup"
+            aria-labelledby={labelId}
+            aria-describedby={describedBy}
+            data-count={options.length}
+            data-index={selected < 0 ? 0 : selected}
+            {...props.field.invalid ? { 'aria-invalid': true } : {}}
+            onKeyDown={event => {
+              const step = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1
+                : event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 0
+              if (step === 0) return
+              event.preventDefault()
+              const next = (Math.max(0, selected) + step + options.length) % options.length
+              props.onEdit(options[next].value)
+              event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="radio"]')[next]?.focus()
+            }}
+          >
+            <span className={css.segThumb} aria-hidden="true" />
+            {options.map(option => (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={option.value === props.field.text}
+                tabIndex={option.value === props.field.text ? 0 : -1}
+                className={css.segOption}
+                disabled={props.disabled}
+                onClick={() => { props.onEdit(option.value) }}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        ) : <input
+          id={props.id}
+          name={props.id}
+          autoComplete="off"
+          placeholder={props.placeholder}
+          aria-describedby={describedBy}
+          className={props.field.invalid ? css.inputInvalid : css.input}
+          type={props.numeric === true ? 'number' : 'text'}
+          {...props.numeric === true ? { inputMode: 'numeric' as const } : {}}
+          {...props.field.invalid ? { 'aria-invalid': true } : {}}
+          value={props.field.text}
+          disabled={props.disabled}
+          onChange={(event) => { props.onEdit(event.target.value) }}
+        />}
+      </div>
+      <HintText id={hintId} hint={props.hint} />
+      {props.field.invalid ? <p id={errorId} className={css.rowInvalid} role="alert">{props.invalidLabel}</p> : null}
+    </div>
+  )
+}
+
+/**
+ * The gateway's model listing in the state the page last read.
+ * @param props.models - the listing state the controller published.
+ * @param props.t - section copy.
+ * @returns the listing body: a progress line, the Host diagnostic, or an empty
+ *   body once the capacity table can show the complete model list.
+ */
+function ModelsBody({ models, t, locale }: {
+  models: ClinePassModels
+  t: SectionTranslate
+  locale?: string
+}) {
+  const sources = models.status === 'ready' || models.status === 'failed' ? models.sources : undefined
+  const metadataOnlyFailure = sources?.metadata.error !== undefined && sources.listing.error === undefined
+  const sourceStatus = sources
+    ? (['listing', 'metadata'] as const).map(source => {
+      const status = sources[source]
+      return <p className={css.hint} key={source}>
+        {t(source === 'listing' ? 'modelsListingSource' : 'modelsMetadataSource')}: {' '}
+        {status.error ? t('modelsSourceFailed') : t('modelsSourceCurrent')}. {' '}
+        {status.updatedAt === undefined ? t('modelsSourceNeverFetched')
+          : t('modelsSourceUpdated', { time: new Date(status.updatedAt).toLocaleString(locale) })}
+        {status.warning ? <> {status.warning}</> : null}
+      </p>
+    }) : null
+  if (models.status === 'failed') {
+    return (
+      <>
+        <p className={css.failedNote} role="alert">{t(metadataOnlyFailure ? 'modelsMetadataFailed' : 'modelsFailed')}</p>
+        {models.message ? <p className={css.hint}>{models.message}</p> : null}
+        {sourceStatus}
+      </>
+    )
+  }
+  if (models.status !== 'ready') return <p className={css.hint} role="status" aria-live="polite">{t('modelsLoading')}</p>
+  const progress = models.refreshing ? <p className={css.hint} role="status">{t('modelsRefreshing')}</p> : null
+  if (models.stale) return <>
+    {progress}
+    <p className={css.failedNote} role="alert">{t(metadataOnlyFailure ? 'modelsMetadataFailed' : 'modelsStale')}</p>
+    {models.message ? <p className={css.hint}>{models.message}</p> : null}
+    {sourceStatus}
+  </>
+  const warning = sources?.listing.warning
+    ? <p className={css.failedNote} role="alert">{sources.listing.warning}</p> : null
+  return <>{progress}{warning}{models.count === 0 ? <p className={css.hint}>{t('modelsEmpty')}</p> : null}</>
+}
+
+/**
+ * Render the ClinePass settings page.
+ * @param props - locale copy, the page snapshot, and its form actions.
+ * @returns the section.
+ */
+export function ClinePassSection(props: ClinePassSectionProps) {
+  const { useClinePass, edit, resetField, save, discard, loadModels, setEnabled, setModelEnabled, t } = props
+  if (useClinePass === undefined || edit === undefined || resetField === undefined
+    || save === undefined || discard === undefined || loadModels === undefined
+    || setEnabled === undefined || setModelEnabled === undefined || t === undefined) return null
+  return (
+    <Loaded
+      state={useClinePass(snapshot => snapshot)}
+      t={t}
+      locale={props.getLocale?.()}
+      edit={edit}
+      resetField={resetField}
+      save={save}
+      discard={discard}
+      loadModels={loadModels}
+      setEnabled={setEnabled}
+      setModelEnabled={setModelEnabled}
+      readAnalytics={props.readAnalytics}
+      readQuota={props.readQuota}
+      getLocale={props.getLocale}
+      accountActions={props.loadAccounts && props.addAccount && props.renameAccount && props.removeAccount
+        && props.selectAccount && props.setAutoSwitch && props.replaceAccountKey && props.moveAccount ? {
+          loadAccounts: props.loadAccounts, addAccount: props.addAccount, renameAccount: props.renameAccount,
+          resetAddition: props.resetAddition,
+          removeAccount: props.removeAccount, selectAccount: props.selectAccount,
+          setAutoSwitch: props.setAutoSwitch, replaceAccountKey: props.replaceAccountKey,
+          moveAccount: props.moveAccount,
+        } : undefined}
+    />
+  )
+}
+
+/** The page once every injected seat is present. */
+function Loaded(props: {
+  state: ClinePassSectionState
+  t: SectionTranslate
+  locale?: string
+  edit: (field: string, text: string) => void
+  resetField: (field: string) => void
+  save: () => void
+  discard: () => void
+  loadModels: () => void
+  setEnabled: (next: boolean) => void
+  setModelEnabled: (id: string, next: boolean) => void
+  readAnalytics?: (query: AnalyticsQuery, signal?: AbortSignal) => Promise<AnalyticsReport>
+  readQuota?: (ref: string) => Promise<ClineUsage>
+  getLocale?: () => string
+  accountActions?: ClineAccountsActions
+}) {
+  const { t, state, loadModels } = props
+  const [advanced, setAdvanced] = useState(false)
+  // The list is the page's largest block and the tuning fields sit under it, so
+  // it ships folded: a reader opens it when they came to change models.
+  const [modelsOpen, setModelsOpen] = useState(false)
+  // The analytics card unfolds into two rows — the dashboard entry and the only
+  // place a style is chosen — and the dialog is its own modal on top of that.
+  const [analyticsOpen, setAnalyticsOpen] = useState(false)
+  const [analyticsPanel, setAnalyticsPanel] = useState(false)
+  const theme = useGoTheme()
+  // What the card has to report — the listing's own diagnostics and a refused
+  // switch write — is not part of the fold. A failure the reader cannot see is
+  // worse than a folded list, and the connection switch that can fail lives in
+  // the card above, so the notices render under the header either way.
+  const modelNotices = (
+    <>
+      <ModelsBody models={state.models} t={t} locale={props.locale} />
+      {state.pickerFailed ? <p className={css.failedNote} role="alert">{t('pickerFailed')}</p> : null}
+    </>
+  )
+  // The shell mounts only the open section, so a mount is the page being
+  // opened: read the listing once, and let the button re-read it afterwards.
+  useEffect(() => {
+    if (state.available && state.models.status === 'idle') loadModels()
+  }, [state.available, state.models.status, loadModels])
+  if (!state.available) {
+    return <p className={css.intro}>{t('unavailable')}</p>
+  }
+  const disabled = !state.writable
+  // The provider switch says what its state means; the mark opens the sentence.
+  const enabledHint = state.enabled ? t('enabledHint') : t('enabledOff')
+  const accountCard = state.accounts && props.accountActions ? <AccountsCard
+    state={state.accounts} actions={props.accountActions} writable={state.writable}
+    t={t} locale={props.locale} /> : null
+  const fieldProps = {
+    invalidLabel: t('invalidValue'),
+    disabled,
+  }
+  const advancedOverridden = ADVANCED_FIELDS.some(field => state[field].overridden)
+  // Invalid drafts cannot be saved, but must still be recoverable with Reset.
+  const canResetAdvanced = ADVANCED_FIELDS.some(field => state[field].overridden || state[field].invalid)
+  return (
+    <div className={css.page}>
+      <div className={css.pageBody}>
+      <div className={css.pageTop}>
+        <h2 className={css.title}>{t('titleLabel')}</h2>
+        <p className={css.intro}>{t('intro')}</p>
+      </div>
+      {/* Account management owns credential entry and replacement. Keep the
+          standalone key control only for callers without the account actions. */}
+      <section className={css.card}>
+        <div className={css.cardHead}>
+          <h3 className={css.cardTitle}>{t('enabledLabel')}<HintMark hint={enabledHint} /></h3>
+          <Switch
+            checked={state.enabled}
+            label={t('enabledLabel')}
+            // The Switch primitive carries no aria-describedby, so its description
+            // rides the only channel it forwards; the mark opens the same sentence
+            // in the Host's bubble for a pointer.
+            title={enabledHint}
+            // The settings document being read-only is what locks the switch;
+            // the credential's own writability is unrelated to this field.
+            disabled={disabled || state.saving || state.pickerSaving}
+            onChange={props.setEnabled}
+          />
+        </div>
+        {accountCard ? null : <>
+        <div className={css.cardDivider} />
+        <div className={css.cardHead}>
+          {/* Inline so every supported Host shows the same glyph. */}
+          <span className={css.slot} aria-hidden="true">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" focusable="false">
+              <circle cx="5.4" cy="8" r="3.1" />
+              <path d="M8.5 8h5.3M11.9 8v2.2M10.2 8v1.6" />
+            </svg>
+          </span>
+          <label className={css.label} htmlFor="clinepass-key">{t('keyLabel')}</label>
+          <span className={css.trailing}>
+            <Tag tone={state.apiKeyConfigured ? 'success' : 'warning'}>
+              {state.apiKeyConfigured ? t('keyConfigured') : t('keyMissing')}
+            </Tag>
+          </span>
+        </div>
+        <div className={css.cardBody}>
+          <input
+            id="clinepass-key"
+            name="api-key"
+            className={css.input}
+            type="password"
+            autoComplete="off"
+            aria-describedby="clinepass-key-hint"
+            value={state.apiKey.text}
+            // The credentials domain accepts a key even when the settings document
+            // itself is read-only; its own writability is what disables this
+            // control — a key sourced from the environment cannot be written here.
+            disabled={!state.apiKeyWritable}
+            onChange={(event) => { props.edit('apiKey', event.target.value) }}
+          />
+          <p id="clinepass-key-hint" className={css.hint}>{state.apiKeyWritable
+            ? <>{t('keyHint')}{' '}<a className={css.hintLink} href={API_KEYS_URL}
+              target="_blank" rel="noopener noreferrer" title={t('keyLink')}>{t('keyLink')}</a></>
+            : t('keyNotWritable')}</p>
+        </div>
+        </>}
+      </section>
+      {accountCard}
+      {/* The card unfolds like the model and advanced cards: its first row opens
+          the dashboard, its second is the only place a style is chosen — the pill
+          and the dashboard themselves never change their own look. Folded, it
+          still names the active style, so the row answers "which one am I on". */}
+      {props.readAnalytics ? <section className={css.card}>
+        <button
+          type="button"
+          className={css.cardTrigger}
+          aria-expanded={analyticsPanel}
+          aria-controls="clinepass-analytics"
+          onClick={() => { setAnalyticsPanel(!analyticsPanel) }}
+        >
+          <span className={css.cardTitle}>{t('analyticsCardTitle')}</span>
+          <span className={css.cardSub}>{t(GO_THEME_LABELS[theme])}</span>
+          <ChevronDown className={analyticsPanel ? css.chevronOpen : css.chevron} />
+        </button>
+        {analyticsPanel ? <div id="clinepass-analytics" className={css.analyticsPanel}>
+          <div className={css.analyticsSection}>
+            <div className={css.analyticsCopy}>
+              <span className={css.analyticsLabel}>{t('analyticsBoardLabel')}</span>
+              <p className={css.hint}>{t('analyticsCardHint')}</p>
+            </div>
+            <Button variant="outline" size="md" onClick={() => { setAnalyticsOpen(true) }}>
+              {t('analyticsOpenBoard')}
+            </Button>
+          </div>
+          <div className={css.analyticsDivider} />
+          <div className={css.analyticsSection}>
+            <div className={css.analyticsCopy}>
+              <span className={css.analyticsLabel}>{t('themeLabel')}</span>
+              <p className={css.hint}>{t('themeHint')}</p>
+            </div>
+            <ThemePicker t={t} />
+          </div>
+        </div> : null}
+      </section> : null}
+      {/* The model card takes whatever height the page has left: its list and its
+          parameter card are the reason the page is open. It folds away exactly
+          like the tuning card does, and the listing's own refresh sits with the
+          filters it re-reads rather than in this header. Its notices stay out of
+          the fold: a refused switch write or an unreachable gateway is news
+          whether or not the list is open. */}
+      <section className={modelsOpen ? css.cardModels : css.cardModels + ' ' + css.cardFolded}>
+        <button
+          type="button"
+          className={css.cardTrigger}
+          aria-expanded={modelsOpen}
+          aria-controls="clinepass-models"
+          onClick={() => { setModelsOpen(!modelsOpen) }}
+        >
+          <span className={css.cardTitle}>{t('modelsLabel')}</span>
+          <ChevronDown className={modelsOpen ? css.chevronOpen : css.chevron} />
+        </button>
+        {modelsOpen
+          ? (
+            <div id="clinepass-models" className={css.cardBody}>
+              {modelNotices}
+              <ModelEditor models={state.models} draft={state.modelLimitDraft} t={t} locale={props.locale} disabled={disabled || state.saving}
+                modelVisibility={state.modelVisibility} visibilitySaving={state.pickerSaving}
+                filterAction={(
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={state.models.status === 'loading' || state.models.status === 'ready' && state.models.refreshing}
+                    onClick={loadModels}
+                  >
+                    {t('modelsRefresh')}
+                  </Button>
+                )}
+                onModelEnabled={props.setModelEnabled}
+                onEdit={next => { props.edit('modelLimits', JSON.stringify(next)) }} />
+            </div>
+          )
+          : <div className={css.cardNotes}>{modelNotices}</div>}
+      </section>
+      {/* Everything a working setup never needs stays folded at the foot of the
+          page, under the card that owns the values it inherits. */}
+      <section className={css.card}>
+        <button
+          type="button"
+          className={css.cardTrigger}
+          aria-expanded={advanced}
+          aria-controls="clinepass-advanced"
+          onClick={() => { setAdvanced(!advanced) }}
+        >
+          <span className={css.cardTitle}>{t('advancedLabel')}</span>
+          {advancedOverridden ? <Tag tone="neutral">{t('overridden')}</Tag> : null}
+          <ChevronDown className={advanced ? css.chevronOpen : css.chevron} />
+        </button>
+        {advanced
+          ? (
+            <div id="clinepass-advanced" className={css.cardBody}>
+              <div className={css.advancedHead}>
+                <p className={css.hint}>{t('advancedHint')}</p>
+                {/* One reset for the card: the rows carry no badges of their own, so
+                    this is the only place a value returns to its inherited default. */}
+                <button
+                  type="button"
+                  className={css.reset}
+                  disabled={disabled || !canResetAdvanced}
+                  onClick={() => {
+                    for (const field of ADVANCED_FIELDS) {
+                      if (state[field].overridden || state[field].invalid) props.resetField(field)
+                    }
+                  }}
+                >
+                  {t('advancedResetAll')}
+                </button>
+              </div>
+              <div className={css.rows}>
+                <div className={css.groupHead}>{t('groupUsageProtocol')}</div>
+                <ValueField
+                  id="clinepass-usage-display"
+                  label={t('usageDisplayLabel')}
+                  hint={t('usageDisplayHint')}
+                  field={state.usageDisplay}
+                  options={USAGE_DISPLAY_MODES.map(value => ({ value, label: t(`usageDisplay_${value}`) }))}
+                  {...fieldProps}
+                  onEdit={text => { props.edit('usageDisplay', text) }}
+                />
+                <div className={css.groupHead}>{t('groupConnection')}</div>
+                <ValueField
+                  id="clinepass-base-url"
+                  label={t('baseURLLabel')}
+                  hint={t('baseURLHint')}
+                  field={state.baseURL}
+                  placeholder="https://api.cline.bot/api/v1"
+                  {...fieldProps}
+                  onEdit={(text) => { props.edit('baseURL', text) }}
+                />
+                <ValueField
+                  id="clinepass-proxy-url"
+                  label={t('proxyURLLabel')}
+                  hint={t('proxyURLHint')}
+                  placeholder="http://127.0.0.1:7890"
+                  field={state.proxyURL}
+                  {...fieldProps}
+                  invalidLabel={t('proxyURLInvalid')}
+                  onEdit={(text) => { props.edit('proxyURL', text) }}
+                />
+                <div className={css.groupHead}>{t('groupCacheTimeouts')}</div>
+                <ValueField
+                  id="clinepass-refresh-minutes"
+                  label={t('refreshMinutesLabel')}
+                  hint={t('refreshMinutesHint')}
+                  field={state.refreshMinutes}
+                  numeric
+                  {...fieldProps}
+                  onEdit={(text) => { props.edit('refreshMinutes', text) }}
+                />
+                <ValueField
+                  id="clinepass-stream-idle"
+                  label={t('streamIdleTimeoutMsLabel')}
+                  hint={t('streamIdleTimeoutMsHint')}
+                  field={state.streamIdleTimeoutMs}
+                  numeric
+                  {...fieldProps}
+                  onEdit={(text) => { props.edit('streamIdleTimeoutMs', text) }}
+                />
+                <div className={css.groupHead}>{t('groupImages')}</div>
+                <ValueField
+                  id="clinepass-max-images"
+                  label={t('maxImagesLabel')}
+                  hint={t('maxImagesHint')}
+                  field={state.maxImages}
+                  numeric
+                  {...fieldProps}
+                  onEdit={(text) => { props.edit('maxImages', text) }}
+                />
+                <ValueField
+                  id="clinepass-max-request-image-bytes"
+                  label={t('maxRequestImageBytesLabel')}
+                  hint={t('maxRequestImageBytesHint')}
+                  field={state.maxRequestImageBytes}
+                  numeric
+                  {...fieldProps}
+                  onEdit={(text) => { props.edit('maxRequestImageBytes', text) }}
+                />
+                <ValueField
+                  id="clinepass-image-pixel-budget"
+                  label={t('requestImagePixelBudgetLabel')}
+                  hint={t('requestImagePixelBudgetHint')}
+                  field={state.requestImagePixelBudget}
+                  numeric
+                  {...fieldProps}
+                  onEdit={(text) => { props.edit('requestImagePixelBudget', text) }}
+                />
+                <ValueField
+                  id="clinepass-image-max-bytes"
+                  label={t('requestImageMaxBytesLabel')}
+                  hint={t('requestImageMaxBytesHint')}
+                  field={state.requestImageMaxBytes}
+                  numeric
+                  {...fieldProps}
+                  onEdit={(text) => { props.edit('requestImageMaxBytes', text) }}
+                />
+              </div>
+            </div>
+          )
+          : null}
+      </section>
+      {disabled ? <p className={css.hint}>{t('readOnly')}</p> : null}
+      </div>
+      <div className={css.actions}>
+        <Button variant="primary" size="md" disabled={disabled || !state.dirty || state.invalid || state.saving || state.pickerSaving} onClick={props.save}>
+          {state.saving ? t('saving') : t('save')}
+        </Button>
+        <Button variant="outline" size="md" disabled={disabled || !state.dirty || state.saving} onClick={props.discard}>
+          {t('discard')}
+        </Button>
+        <a className={css.starLink} href="https://github.com/Duskriver/dsh-clinepass"
+          target="_blank" rel="noopener noreferrer" title={t('starProjectTitle')}>
+          {/* GitHub mark from Simple Icons (CC0). Inline so all supported Hosts share the same icon. */}
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true" focusable="false">
+            <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+          </svg>
+          <span>{t('starProject')}</span>
+        </a>
+        {state.failed ? <p className={css.failedNote}>{t('savedFailed')}</p> : null}
+      </div>
+      {props.readAnalytics ? <AnalyticsDialog
+        open={analyticsOpen}
+        onClose={() => { setAnalyticsOpen(false) }}
+        readAnalytics={props.readAnalytics}
+        readQuota={props.readQuota && state.accounts
+          ? () => props.readQuota!(state.accounts!.activeRef)
+          : undefined}
+        t={t}
+        getLocale={props.getLocale}
+      /> : null}
+    </div>
+  )
+}

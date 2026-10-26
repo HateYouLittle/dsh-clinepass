@@ -1,0 +1,10 @@
+node_modules/
+*.tgz
+coverage/
+.env
+.verification-root
+mockups/
+# 本地构建产物与上游检查缓存（不入库）
+/out/
+.upstream-watch/
+.archify/
