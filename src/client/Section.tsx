@@ -566,7 +566,7 @@ function Loaded(props: {
         <Button variant="outline" size="md" disabled={disabled || !state.dirty || state.saving} onClick={props.discard}>
           {t('discard')}
         </Button>
-        <a className={css.starLink} href="https://github.com/Duskriver/dsh-clinepass"
+        <a className={css.starLink} href="https://github.com/HateYouLittle/dsh-clinepass"
           target="_blank" rel="noopener noreferrer" title={t('starProjectTitle')}>
           {/* GitHub mark from Simple Icons (CC0). Inline so all supported Hosts share the same icon. */}
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true" focusable="false">

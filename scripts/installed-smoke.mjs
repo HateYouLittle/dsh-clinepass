@@ -2,7 +2,7 @@
  * Exercise a tarball installed in a separate consumer through Cordis's real package resolver.
  *
  * Usage: npm run verify:installed -- <consumer-root>
- * The consumer must be a directory where `dsh-clinepass` (and the DSH packages it
+ * The consumer must be a directory where `@crackedopal/dsh-clinepass` (and the DSH packages it
  * loads through) are installed; `npm run test:install` builds one and leaves it
  * in the system temp directory. Running it without a consumer root cannot work,
  * because a package cannot resolve itself as an installed dependency.
@@ -15,11 +15,11 @@ import { createServer } from 'node:http'
 import { once } from 'node:events'
 
 if (process.argv[2] === undefined) {
-  throw new Error('Usage: npm run verify:installed -- <consumer-root> (a directory where dsh-clinepass is installed)')
+  throw new Error('Usage: npm run verify:installed -- <consumer-root> (a directory where @crackedopal/dsh-clinepass is installed)')
 }
 const consumer = resolve(process.argv[2])
 const require = createRequire(resolve(consumer, 'package.json'))
-const entry = require.resolve('dsh-clinepass')
+const entry = require.resolve('@crackedopal/dsh-clinepass')
 const fromPlugin = createRequire(entry)
 const load = id => import(pathToFileURL(fromPlugin.resolve(id)).href)
 const { Context } = await load('@deepseek-ai/cordis')
@@ -53,7 +53,7 @@ try {
   await ctx.plugin(Loader)
   await ctx.loader.create({ name: '@deepseek-ai/dsh-llm' })
   const adapterId = await ctx.loader.create({
-    name: 'dsh-clinepass',
+    name: '@crackedopal/dsh-clinepass',
     config: { apiKeyEnv: 'CLINEPASS_INSTALL_TEST_KEY', baseURL: `http://127.0.0.1:${server.address().port}`, streamIdleTimeoutMs: 5000 },
   })
   await ctx.loader.await()

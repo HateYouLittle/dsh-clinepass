@@ -77,7 +77,7 @@ Key 通过 DSH 凭据服务保存，设置页不会回显已保存的密钥。
 在 **插件 → 添加插件** 中选择本仓库的目录，或使用命令行把当前目录作为安装目标：
 
 ```sh
-dsh plugin --profile desktop add /path/to/dsh-clinepass
+dsh plugin --profile desktop add @crackedopal/dsh-clinepass
 ```
 
 也可以直接使用 `plugin_manager` 的 `install_bundle`，把本仓库的绝对路径作为安装目标。
@@ -132,7 +132,7 @@ ClinePass 只提供 OpenAI 兼容的 Chat Completions 协议，因此本插件�
 卸载：
 
 ```sh
-dsh plugin --profile desktop remove dsh-clinepass
+dsh plugin --profile desktop remove @crackedopal/dsh-clinepass
 ```
 
 ## 更多文档

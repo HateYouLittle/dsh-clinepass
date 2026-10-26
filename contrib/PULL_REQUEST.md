@@ -35,7 +35,7 @@ per-model capacity overrides and account failover, derived from
 Install either way:
 
 ```sh
-dsh plugin --profile web add dsh-clinepass          # npm, prebuilt
+dsh plugin --profile web add @crackedopal/dsh-clinepass   # npm, prebuilt
 dsh plugin --profile web add github:HateYouLittle/dsh-clinepass
 ```
 

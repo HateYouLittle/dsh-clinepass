@@ -48,7 +48,7 @@ async function loadComposition(lines: readonly string[]): Promise<Context> {
   const modules = new Map<string, unknown>([
     ['@deepseek-ai/dsh-llm', LlmRuntime],
     ['@deepseek-ai/dsh-credentials-local', LocalCredentialProvider],
-    ['dsh-clinepass', ClinePass],
+    ['@crackedopal/dsh-clinepass', ClinePass],
   ])
   ctx.loader.internal = {
     version: 'v2',
@@ -75,7 +75,7 @@ describe('llm-clinepass through a real Loader composition', () => {
     const gateway = await mockGateway({ status: 200, body: listingBody(fullLiveListing()) })
     const ctx = await loadComposition([
       "- name: '@deepseek-ai/dsh-llm'",
-      "- name: 'dsh-clinepass'",
+      "- name: '@crackedopal/dsh-clinepass'",
       '  config:',
       `    baseURL: ${gateway.url}`,
       '    modelLimits:',
@@ -104,7 +104,7 @@ describe('llm-clinepass through a real Loader composition', () => {
     gateway.pushCompletions({ events: textEvents })
     const ctx = await loadComposition([
       "- name: '@deepseek-ai/dsh-llm'",
-      "- name: 'dsh-clinepass'",
+      "- name: '@crackedopal/dsh-clinepass'",
       '  config:',
       `    baseURL: ${gateway.url}`,
     ])
@@ -147,7 +147,7 @@ describe('llm-clinepass through a real Loader composition', () => {
     // at boot, not only at the next credentials write.
     const ctx = await loadComposition([
       "- name: '@deepseek-ai/dsh-llm'",
-      "- name: 'dsh-clinepass'",
+      "- name: '@crackedopal/dsh-clinepass'",
       '  config:',
       `    baseURL: ${gateway.url}`,
       "- name: '@deepseek-ai/dsh-credentials-local'",

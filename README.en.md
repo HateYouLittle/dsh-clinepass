@@ -98,7 +98,7 @@ Choose this repository's directory in **Plugins → Add plugin**, or install the
 directly:
 
 ```sh
-dsh plugin --profile desktop add /path/to/dsh-clinepass
+dsh plugin --profile desktop add @crackedopal/dsh-clinepass
 ```
 
 The `plugin_manager` tool's `install_bundle` also accepts this repository's absolute path.
@@ -179,7 +179,7 @@ overflow is handed to DSH's own recovery.
 Uninstall:
 
 ```sh
-dsh plugin --profile desktop remove dsh-clinepass
+dsh plugin --profile desktop remove @crackedopal/dsh-clinepass
 ```
 
 ## More documentation

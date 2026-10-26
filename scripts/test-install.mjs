@@ -129,7 +129,7 @@ try {
 
 async function checkConsumerTypes(consumer, label) {
   await writeFile(join(consumer, 'consumer.mts'), [
-    'import { ClinePassCatalog } from "dsh-clinepass";',
+    'import { ClinePassCatalog } from "@crackedopal/dsh-clinepass";',
     'declare const catalog: ClinePassCatalog;',
     'const snapshot = await catalog.snapshot();',
     'const model = snapshot.models.values().next().value;',

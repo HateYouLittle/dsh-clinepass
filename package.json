@@ -1,5 +1,5 @@
 {
-  "name": "dsh-clinepass",
+  "name": "@crackedopal/dsh-clinepass",
   "version": "0.1.0",
   "description": "ClinePass model provider and settings UI for DeepSeek Harness",
   "repository": {

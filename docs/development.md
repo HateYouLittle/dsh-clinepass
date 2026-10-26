@@ -19,7 +19,7 @@ The plugin is an independent client and is not affiliated with or endorsed by Cl
 | `npm run typecheck` | `tsc --noEmit` for the host and client projects |
 | `npm test` | Rebuild (`pretest`) and run the Vitest suite |
 | `npm run test:ci` | Verify the shipped artifacts, then run the suite |
-| `npm run verify:installed` | Resolve an installed `dsh-clinepass` from a consumer directory (the current directory by default) and exercise a real Cordis mount against a loopback fake gateway |
+| `npm run verify:installed` | Resolve the installed `@crackedopal/dsh-clinepass` from a consumer directory (pass its path; `npm run test:install` builds one) and exercise a real Cordis mount against a loopback fake gateway |
 | `npm run verify:headless` | Drive the shipped `dsh --profile headless` against a loopback fake gateway; the consumer root is its argument |
 | `npm run test:install` | Install prebuilt Git and npm artifacts into fresh npm and pnpm consumers and type-check the public declarations |
 | `npm run verify` | `test:ci` plus `test:install` |
