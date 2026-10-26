@@ -307,7 +307,8 @@ function ActiveUsage({ readUsage, readAnalytics, t, getLocale, accounts, activeR
                   aria-label={t(`usage_${key}`)} max={100} value={Math.min(100, usage[key].percent)} />
                 <strong className={css.windowPercent}>{usage[key].percent}%</strong>
               </div>
-              <div className={css.windowReset}>{t('usageResets')} {new Date(usage[key].resetsAt).toLocaleString(getLocale?.())}</div>
+              <div className={css.windowReset}>{t('usageResets')} {usage[key].resetsAt === undefined
+                ? t('usageResetUnknown') : new Date(usage[key].resetsAt!).toLocaleString(getLocale?.())}</div>
               {usage[key].status === 'rate-limited' && <div className={css.limitedText}>{t('usageLimited')}</div>}
             </div>
           </Fragment>)}

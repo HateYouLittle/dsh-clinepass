@@ -3,7 +3,16 @@ import type { ClineAccountSwitch } from './accounts.ts';
 export interface UsageWindow {
     status: 'ok' | 'rate-limited';
     percent: number;
-    resetsAt: string;
+    /**
+     * ISO timestamp the provider reported for this window's next reset.
+     *
+     * Absent when the provider reports no reset time. Measured against the live
+     * endpoint: a window that is idle at `percentUsed: 0` carries no `resetsAt`
+     * at all (the rolling 5-hour window does this whenever it has gone quiet),
+     * while an active or recently used window carries one. Treating a missing
+     * value as malformed rejected the whole reading.
+     */
+    resetsAt?: string;
 }
 export interface ClineUsage {
     /** Opaque Host identity for this endpoint/account; never a credential or its hash. */
@@ -56,10 +65,12 @@ export declare function parseClineUsage(value: unknown): ClineUsage;
  * ] } }
  * ```
  *
- * Each row must carry a finite `percentUsed` in 0..100 and a parseable
- * `resetsAt`; all three windows must be present. A malformed or missing row
- * throws, so the service reports the reading as unavailable instead of
- * presenting a zero. Unknown `type` values are ignored (the endpoint may add
+ * Each row must carry a finite `percentUsed` in 0..100. `resetsAt` is
+ * OPTIONAL: the live endpoint omits it for a window that is idle at 0% (the
+ * rolling 5-hour window does this whenever it has gone quiet), and only a
+ * present value must parse. All three windows must be present. A malformed or
+ * missing row throws, so the service reports the reading as unavailable instead
+ * of presenting a zero. Unknown `type` values are ignored (the endpoint may add
  * windows this contract cannot show), while a duplicated window type is
  * rejected as ambiguous rather than silently resolved.
  *

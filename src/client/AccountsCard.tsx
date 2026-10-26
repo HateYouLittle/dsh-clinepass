@@ -23,11 +23,12 @@ const ChevronDown = (primitives as typeof primitives & {
 /**
  * The rolling window's reset as a countdown: the row keeps the one number a reader
  * acts on, and the opened detail carries the absolute stamps.
- * @param resetsAt - ISO timestamp the gateway reported.
+ * @param resetsAt - ISO timestamp the gateway reported, or absent when it reported none.
  * @param t - page translator.
  * @returns the countdown text.
  */
-function resetText(resetsAt: string, t: Translate): string {
+function resetText(resetsAt: string | undefined, t: Translate): string {
+  if (resetsAt === undefined) return t('usageResetUnknown')
   const remaining = Date.parse(resetsAt) - Date.now()
   if (!Number.isFinite(remaining)) return t('usageResetUnknown')
   if (remaining <= 0) return t('usageResetDue')
@@ -202,7 +203,8 @@ export function AccountsCard({ state, actions, writable, t, locale }: {
         <progress data-level={barLevel(account.usage![window])} max={100}
           value={Math.min(100, account.usage![window].percent)}
           aria-label={`${label} ${t(`usage_${window}`)}`} />
-        <span className={css.hint}>{t('usageResets')} {new Date(account.usage![window].resetsAt).toLocaleString(locale)}</span>
+        <span className={css.hint}>{t('usageResets')} {account.usage![window].resetsAt === undefined
+          ? t('usageResetUnknown') : new Date(account.usage![window].resetsAt!).toLocaleString(locale)}</span>
       </div>)}
     </div> : <p className={css.hint}>{t(account.loading ? 'usageLoading' : 'usageUnavailable')}</p>}
     <div className={css.accountActions}>

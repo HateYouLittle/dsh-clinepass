@@ -69,6 +69,35 @@ it('parses a realistic usage-limits payload into the three windows', () => {
     })
 })
 
+it('accepts a window the provider reports without a reset time', () => {
+  // Captured live from GET /users/me/plan/usage-limits: once the rolling
+  // 5-hour window has gone quiet it reports percentUsed 0 and omits resetsAt
+  // entirely. Treating that as malformed rejected the whole reading, so the
+  // account card showed "Invalid ClinePass usage response" while the key was
+  // perfectly valid.
+  const live = {
+    data: {
+      limits: [
+        { type: 'five_hour', percentUsed: 0 },
+        { type: 'weekly', percentUsed: 63, resetsAt: '2026-10-31T13:16:46.091253373Z' },
+        { type: 'monthly', percentUsed: 49, resetsAt: '2026-11-08T02:57:06.093118312Z' },
+      ],
+    },
+    success: true,
+  }
+  expect(parseUsageLimitsResponse(live)).toEqual({
+    rolling: { status: 'ok', percent: 0 },
+    weekly: { status: 'ok', percent: 63, resetsAt: '2026-10-31T13:16:46.091253373Z' },
+    monthly: { status: 'ok', percent: 49, resetsAt: '2026-11-08T02:57:06.093118312Z' },
+  })
+  // The same omission must survive the remote codec that carries the reading to
+  // the browser, including an explicit null.
+  const decoded = parseUsageLimitsResponse(live)
+  expect(parseClineUsage(decoded)).toEqual(decoded)
+  expect(parseClineUsage({ ...decoded, rolling: { status: 'ok', percent: 0, resetsAt: undefined } }).rolling)
+    .toEqual({ status: 'ok', percent: 0 })
+})
+
 it('rejects a malformed or incomplete usage-limits payload instead of zeroing a window', () => {
   const rows = limitsBody.data.limits
   const partial = [limit('weekly', 10), limit('monthly', 7)]

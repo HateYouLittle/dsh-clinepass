@@ -489,7 +489,8 @@ function QuotaSection({ quota, locale, t }: CopyProps & { quota: ClineUsage }) {
             <span className={css.qTick} />
           </div>
           <div className={css.qFoot}>
-            <span>{t('usageResets')} {new Date(window.resetsAt).toLocaleString(locale)}</span>
+            <span>{t('usageResets')} {window.resetsAt === undefined
+              ? t('usageResetUnknown') : new Date(window.resetsAt).toLocaleString(locale)}</span>
           </div>
           {limited ? <div className={css.qWarn}>{t('usageLimited')}</div> : null}
         </div>

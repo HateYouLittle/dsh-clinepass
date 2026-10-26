@@ -4,7 +4,16 @@ import type { ClineAccountSwitch } from './accounts.ts'
 export interface UsageWindow {
   status: 'ok' | 'rate-limited'
   percent: number
-  resetsAt: string
+  /**
+   * ISO timestamp the provider reported for this window's next reset.
+   *
+   * Absent when the provider reports no reset time. Measured against the live
+   * endpoint: a window that is idle at `percentUsed: 0` carries no `resetsAt`
+   * at all (the rolling 5-hour window does this whenever it has gone quiet),
+   * while an active or recently used window carries one. Treating a missing
+   * value as malformed rejected the whole reading.
+   */
+  resetsAt?: string
 }
 
 export interface ClineUsage {
@@ -69,9 +78,25 @@ function parseWindow(row: unknown): UsageWindow {
   if (!window || typeof window !== 'object'
     || (window.status !== 'ok' && window.status !== 'rate-limited')
     || typeof window.percent !== 'number' || !Number.isFinite(window.percent)
-    || window.percent < 0 || window.percent > 100
-    || typeof window.resetsAt !== 'string' || !Number.isFinite(Date.parse(window.resetsAt))) invalidUsage()
-  return { status: window.status, percent: window.percent, resetsAt: window.resetsAt }
+    || window.percent < 0 || window.percent > 100) invalidUsage()
+  const resetsAt = parseResetsAt(window.resetsAt)
+  return {
+    status: window.status, percent: window.percent,
+    ...(resetsAt === undefined ? {} : { resetsAt }),
+  }
+}
+
+/**
+ * Accept an optional provider reset timestamp. Absent/null means "the provider
+ * reported none" and stays absent; anything else must be a parseable date, so a
+ * corrupted value still fails the reading instead of rendering "Invalid Date".
+ * @param value - the provider's `resetsAt`.
+ * @returns the ISO string, or undefined when the provider omitted it.
+ */
+function parseResetsAt(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) invalidUsage()
+  return value
 }
 
 /**
@@ -109,10 +134,12 @@ export function parseClineUsage(value: unknown): ClineUsage {
  * ] } }
  * ```
  *
- * Each row must carry a finite `percentUsed` in 0..100 and a parseable
- * `resetsAt`; all three windows must be present. A malformed or missing row
- * throws, so the service reports the reading as unavailable instead of
- * presenting a zero. Unknown `type` values are ignored (the endpoint may add
+ * Each row must carry a finite `percentUsed` in 0..100. `resetsAt` is
+ * OPTIONAL: the live endpoint omits it for a window that is idle at 0% (the
+ * rolling 5-hour window does this whenever it has gone quiet), and only a
+ * present value must parse. All three windows must be present. A malformed or
+ * missing row throws, so the service reports the reading as unavailable instead
+ * of presenting a zero. Unknown `type` values are ignored (the endpoint may add
  * windows this contract cannot show), while a duplicated window type is
  * rejected as ambiguous rather than silently resolved.
  *
@@ -132,10 +159,13 @@ export function parseUsageLimitsResponse(body: unknown): ClineUsage {
     const key = typeof entry.type === 'string' ? USAGE_LIMIT_TYPES[entry.type] : undefined
     if (key === undefined) continue
     const percent = entry.percentUsed
-    if (typeof percent !== 'number' || !Number.isFinite(percent) || percent < 0 || percent > 100
-      || typeof entry.resetsAt !== 'string' || !Number.isFinite(Date.parse(entry.resetsAt))) invalidUsage()
+    if (typeof percent !== 'number' || !Number.isFinite(percent) || percent < 0 || percent > 100) invalidUsage()
+    const resetsAt = parseResetsAt(entry.resetsAt)
     if (windows.has(key)) invalidUsage()
-    windows.set(key, { status: usageWindowStatus(percent), percent, resetsAt: entry.resetsAt })
+    windows.set(key, {
+      status: usageWindowStatus(percent), percent,
+      ...(resetsAt === undefined ? {} : { resetsAt }),
+    })
   }
   const result = {} as ClineUsage
   for (const key of USAGE_WINDOWS) {
