@@ -16,7 +16,13 @@ if (args.length > 1 || (args.length === 1 && args[0] !== '--check')) {
   throw new Error('Usage: node scripts/build.mjs [--check]')
 }
 if (args[0] === '--check') {
-  const scratch = await mkdtemp(join(tmpdir(), 'dsh-dist-check-'))
+  // Rebuild into a scratch directory inside the checkout rather than the system
+  // temp dir: `prepublishOnly` runs this, and on locked-down Windows setups
+  // %TEMP% can refuse the write, which aborted `npm publish` before it started.
+  // node_modules/.cache is already gitignored and outside the package `files`.
+  const scratchRoot = join('node_modules', '.cache')
+  await mkdir(scratchRoot, { recursive: true })
+  const scratch = await mkdtemp(join(scratchRoot, 'dsh-dist-check-'))
   try {
     await compile(scratch)
     const [shipped, rebuilt] = await Promise.all([readArtifacts('lib'), readArtifacts(scratch)])
