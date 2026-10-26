@@ -8,3 +8,6 @@ mockups/
 /out/
 .upstream-watch/
 .archify/
+
+# 本地 npm 凭据，绝不入库
+.npmrc
