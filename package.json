@@ -2,6 +2,14 @@
   "name": "dsh-clinepass",
   "version": "0.1.0",
   "description": "ClinePass model provider and settings UI for DeepSeek Harness",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HateYouLittle/dsh-clinepass.git"
+  },
+  "homepage": "https://github.com/HateYouLittle/dsh-clinepass#readme",
+  "bugs": {
+    "url": "https://github.com/HateYouLittle/dsh-clinepass/issues"
+  },
   "type": "module",
   "license": "MIT",
   "engines": {
